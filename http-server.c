@@ -286,96 +286,6 @@ void exit_handler(void)
     }
 }
 
-static int emit_http_srv_cfg(struct Server *srv)
-{
-    struct sockaddr_storage ss;
-    evutil_socket_t fd;
-    static int ffd = -1;
-    ev_socklen_t socklen = sizeof(ss);
-    char addrbuf[128];
-    void *inaddr;
-    const char *addr;
-    int got_port = -1;
-
-    if (-1==ffd) {
-        ffd=open("ns.cfg", O_CREAT|O_RDWR, 777);
-        if (-1==ffd) {
-            printf("cannot create ns.cfg file\n");
-            exit(-1);
-        }
-    }
-
-    fd = evhttp_bound_socket_get_fd(srv->handle);
-    memset(&ss, 0, sizeof(ss));
-    if (getsockname(fd, (struct sockaddr *)&ss, &socklen)) {
-        perror("getsockname() failed");
-        return 1;
-    }
-    if (ss.ss_family == AF_INET) {
-        got_port = ntohs(((struct sockaddr_in*)&ss)->sin_port);
-        inaddr = &((struct sockaddr_in*)&ss)->sin_addr;
-    } else if (ss.ss_family == AF_INET6) {
-        got_port = ntohs(((struct sockaddr_in6*)&ss)->sin6_port);
-        inaddr = &((struct sockaddr_in6*)&ss)->sin6_addr;
-    } else {
-        fprintf(stderr, "Weird address family %d\n",
-            ss.ss_family);
-        return 1;
-    }
-    addr = evutil_inet_ntop(ss.ss_family, inaddr, addrbuf,
-        sizeof(addrbuf));
-    if (addr) {
-        if (getenv("CPX")) {
-          int len=0;
-          printf("add service s%d %s HTTP %d\n",srv->srvid,srv->ip,srv->port);
-          evutil_snprintf(uri_root, sizeof(uri_root),
-              "http://%s:%d",addr,got_port);
-          printf("Url: %s\n", uri_root);
-          len=evutil_snprintf(uri_root,sizeof(uri_root),
-                  "add service s%d %s HTTP %d\n", srv->srvid, srv->ip, srv->port);
-          uri_root[len]=0;
-          write(ffd, uri_root, len);
-          len=evutil_snprintf(uri_root,sizeof(uri_root),
-                  "bind lb vserver v1 s%d\n", srv->srvid);
-          uri_root[len]=0;
-          write(ffd, uri_root, len);
-        } else if (getenv("ENVOY")) {
-          int len = 0;
-          printf("- socket_address:\n");
-          printf("    address: %s\n",srv->ip);
-          printf("    port_value: %d\n", srv->port);
-          len = evutil_snprintf(uri_root,sizeof(uri_root),
-              "- socket_address:\n");
-          uri_root[len] = 0;
-          write(ffd, uri_root, len);
-          len = evutil_snprintf(uri_root, sizeof(uri_root),
-              "    address: %s\n", srv->ip);
-          uri_root[len] = 0;
-          write(ffd, uri_root, len);
-          len = evutil_snprintf(uri_root, sizeof(uri_root),
-              "    port_value: %d\n", srv->port);
-          uri_root[len] = 0;
-          write(ffd, uri_root, len);
-          evutil_snprintf(uri_root, sizeof(uri_root),
-              "http://%s:%d",addr,got_port);
-          printf("Url: %s\n", uri_root);
-      } else if (getenv("haproxy")) {
-          int len = 0;
-          len = evutil_snprintf(uri_root, sizeof(uri_root), " server server%d %s:%d check\n",
-                                srv->srvid, srv->ip, srv->port);
-         uri_root[len] = 0;
-         write(ffd, uri_root, len);
-      } else if (getenv("ngnix")) {
-        int len = 0;
-        len = evutil_snprintf(uri_root, sizeof(uri_root), "server %s:%d;\n",srv->ip,srv->port);
-        uri_root[len] = 0;
-        write(ffd, uri_root, len);
-      } else {
-        fprintf(stderr, "evutil_inet_ntop failed\n");
-        return 1;
-      }
-    }
-}
 
 struct SrvIps {
   char ipAddr[20];
@@ -458,8 +368,8 @@ int main(int argc, char **argv)
       }
       srv->srvid=cnt;
       cnt++;
-	    evhttp_set_gencb(http, send_document_cb, (void*)srv);
-      emit_http_srv_cfg(srv);
+      evhttp_set_gencb(http, send_document_cb, (void*)srv);
+      
     }
     event_base_dispatch(base);
 }

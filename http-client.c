@@ -29,7 +29,7 @@
 #include <getopt.h>
 #include <time.h>
 
-#define MAXSRVRPORTS 4096
+#define MAXSRVRENDPOINTS 4096
 #define MAXREQSZ (8192*2)
 #define MAXIPLEN 128
 #define MAXFILELEN 256
@@ -49,15 +49,19 @@
 
 typedef void (*timer_cb)(int,short,void*);
 
+typedef struct EndPoint {
+  struct in_addr ip;
+  uint16_t port;
+} EndPoint;
+
 typedef struct ClientCfg {
   char client_ip[MAXIPLEN];
-  struct in_addr server_ip;
-  uint16_t srvrport[MAXSRVRPORTS];
-  uint16_t tot_srv_ports; //<=MAXPORT
+  EndPoint srvs[MAXSRVRENDPOINTS];
+  int srvcount;
+  uint16_t tot_srvs; //<=MAXPORT
   char httpfile[MAXFILELEN];
   int reqs; //reqs per client
   int client_count; //client count
-  int cur_srvr_port;
   int rps;
 } ClientCfg;
 
@@ -103,11 +107,12 @@ struct event_base *base;
 const char *def_http_get_req = "GET / HTTP/1.1\r\nHost: helloworld-svc\r\nUser-Agent: http-client\r\nAccept:*/*\r\n\r\n";
 char http_get_req[MAXREQSZ];
 
-static inline uint16_t get_nxt_server_port(void)
+static inline EndPoint *get_nxt_server_endpt(void)
 {
-  uint16_t port = gclientcfg.cur_srvr_port;
-  gclientcfg.cur_srvr_port=(gclientcfg.cur_srvr_port+1)%gclientcfg.tot_srv_ports;
-  return port;
+  static int idx=0;
+  int cur_idx = idx;
+  idx = (idx+1)%(gclientcfg.tot_srvs);
+  return &gclientcfg.srvs[cur_idx];
 }
 
 static inline const char *http_get_timestamp(void)
@@ -216,7 +221,6 @@ static void http_req_handler(int fd, short event, void *ud)
     printf("[%s]: sent %d reqs\n",
            http_get_timestamp(),
            reqs_sent);
-
   }
   return;
 
@@ -251,6 +255,7 @@ static void create_new_cnxn(int cnxn_id)
   ClientInfo *cinfo = &clientInfo[cnxn_id];
   cinfo->idx = cnxn_id;
   int fd = -1;
+  EndPoint *ep = NULL;
 
   fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (fd < -1) {
@@ -270,10 +275,11 @@ static void create_new_cnxn(int cnxn_id)
   addr.sin_port = 0; //ntohs(35664);
   SYSCALL_ERR_EXIT(bind(fd, (struct sockaddr*)&addr, sizeof(addr)));
 
+  ep = get_nxt_server_endpt();
   memset((void*)&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
-  addr.sin_addr = gclientcfg.server_ip;
-  addr.sin_port = htons(gclientcfg.srvrport[get_nxt_server_port()]);
+  addr.sin_addr = ep->ip;
+  addr.sin_port = htons(ep->port);
   connect(fd, (struct sockaddr*)&addr, sizeof(addr));
 }
 
@@ -327,16 +333,7 @@ void signal_handler(int signo)
   return;
 }
 
-static inline void http_populate_port(uint16_t port, int num)
-{
-  int i=0;
-
-  for(i=0;i<num;++i) {
-    gclientcfg.srvrport[i] = port++;
-  }
-}
-
-static inline void http_set_server_ip(const char *ip)
+static inline void http_set_server_ip_port(const char *ip, uint16_t port)
 {
   unsigned char buf[sizeof(struct in6_addr)];
   char str[INET_ADDRSTRLEN];
@@ -347,15 +344,17 @@ static inline void http_set_server_ip(const char *ip)
       printf("Invalid host %s:%s\n",ip,strerror(errno));
       exit(-1);
     }
-    gclientcfg.server_ip=*(struct in_addr*)h->h_addr_list[0];
-    inet_ntop(AF_INET,(void*)&gclientcfg.server_ip,str,INET_ADDRSTRLEN);
+    gclientcfg.srvs[gclientcfg.srvcount].ip=*(struct in_addr*)h->h_addr_list[0];
+    inet_ntop(AF_INET,(void*)&gclientcfg.srvs[gclientcfg.srvcount].ip,str,INET_ADDRSTRLEN);
     printf("Server located at address: %s\n",str);
   } else {
-    gclientcfg.server_ip=*(struct in_addr*)buf;
+    gclientcfg.srvs[gclientcfg.srvcount].ip=*(struct in_addr*)buf;
   }
+  gclientcfg.srvs[gclientcfg.srvcount].port = port;
+  gclientcfg.srvcount++;
 }
 
-static const char *optString ="hc:n:i:r:s:p:l:f:";
+static const char *optString ="hc:n:i:r:s:p:l:f:d:";
 static const struct option longOpts[] = {
   {"help", no_argument, NULL, 0 },
   {"client-ip", required_argument, NULL, 0 },
@@ -366,6 +365,7 @@ static const struct option longOpts[] = {
   {"server-port-start", required_argument, NULL, 0 },
   {"num-srvs", required_argument, NULL, 0 },
   {"file", required_argument, NULL,0},
+  {"dest-file", required_argument, NULL, 0},
   { NULL, no_argument, NULL, 0}
 };
 
@@ -381,6 +381,7 @@ static void print_usage(void)
   printf("-s [ --server-ip ]                    Http Server Ip\n");
   printf("-p [ --server-port-start ]            Http Server port start\n");
   printf("-l [ --num-srvs ]                     Http Server port range\n");
+  printf("-d [ --dest-file ]                    Read Http Dest Endpoint from file\n");
   printf("-f [ --file ]                         Http Request template\n");
 }
 
@@ -416,9 +417,34 @@ def:
     return;
 }
 
+static int http_set_server_ip_port_from_file(const char *file)
+{
+  char line[200];
+  char ipAddr[MAXIPLEN];
+  char port[6];
+  FILE *fp = fopen(file, "rb");
+
+  while(fgets(line,sizeof(line),fp)!=NULL) {
+    char *next;
+    int s;
+    int l=strchr(line,' ')-line;
+    strncpy(ipAddr,line,l);
+    ipAddr[l]=0;
+    next=line+l+1;
+    l=strrchr(line,'\n')-next;
+    strncpy(port,next,l);
+    port[l]=0;
+    http_set_server_ip_port(ipAddr,atoi(port));
+    gclientcfg.tot_srvs++; //adjust total servers depending on number of lines in the client spec file
+  }
+}
+
 static void http_parse_args(int argc, char **argv)
 {
-  int retval = -1, opt = -1, longIndex;
+  int retval = -1, opt = -1, longIndex, i=0;
+  char srvIpAddr[MAXIPLEN];
+  uint16_t startPort=0;
+  char dstFile[MAXFILELEN] = {0};
 
   opt = getopt_long(argc, argv, optString, longOpts, &longIndex);
   while(opt!=-1) {
@@ -428,10 +454,11 @@ static void http_parse_args(int argc, char **argv)
      case 'n': gclientcfg.client_count = atoi(optarg); break;
      case 'i': gclientcfg.reqs = atoi(optarg); break;
      case 'r': rps_ctxt.rps = atoi(optarg); break;
-     case 's': http_set_server_ip(optarg); break;
-     case 'p': gclientcfg.srvrport[0]=atoi(optarg); break;
-     case 'l': gclientcfg.tot_srv_ports=atoi(optarg); break;
+     case 's': strncpy(srvIpAddr,optarg,MAXIPLEN); break;
+     case 'p': startPort=atoi(optarg); break;
+     case 'l': gclientcfg.tot_srvs=atoi(optarg); break;
      case 'f': strncpy(gclientcfg.httpfile,optarg,sizeof(gclientcfg.httpfile)); break;
+     case 'd': strncpy(dstFile, optarg, sizeof(dstFile)); break;
      case 0:
        if (!strcmp("client-ip",longOpts[longIndex].name)) {
          strncpy(gclientcfg.client_ip,optarg,MAXIPLEN);
@@ -442,13 +469,15 @@ static void http_parse_args(int argc, char **argv)
        } else if (!strcmp("rps",longOpts[longIndex].name)) {
          rps_ctxt.rps = atoi(optarg);
        } else if (!strcmp("server-ip",longOpts[longIndex].name)) {
-         http_set_server_ip(optarg);
+         strncpy(srvIpAddr,optarg,MAXIPLEN);
        } else if (!strcmp("server-port-start",longOpts[longIndex].name)) {
-         gclientcfg.srvrport[0]=atoi(optarg);
+         startPort=atoi(optarg);
        } else if (!strcmp("num-srvs",longOpts[longIndex].name)) {
-         gclientcfg.tot_srv_ports = atoi(optarg);
+         gclientcfg.tot_srvs = atoi(optarg);
        } else if (!strcmp("file",longOpts[longIndex].name)) {
          strncpy(gclientcfg.httpfile,optarg,sizeof(gclientcfg.httpfile));
+       } else if (!strcmp("dest-file",longOpts[longIndex].name)) {
+         strncpy(dstFile,optarg,sizeof(dstFile));
        } else if (!strcmp("help", longOpts[longIndex].name)) {
          print_usage();
          exit(0);
@@ -470,9 +499,18 @@ static void http_parse_args(int argc, char **argv)
 
   /*Thorough validation*/
   VALIDATE_CFG(gclientcfg.client_ip[0]==0,"--client-ip");
-  VALIDATE_CFG(gclientcfg.server_ip.s_addr==0,"--server-ip");
-  VALIDATE_CFG(gclientcfg.srvrport[0]==0,"--server-port-start");
+  VALIDATE_CFG(!dstFile[0] && srvIpAddr==0,"--server-ip");
+  VALIDATE_CFG(!dstFile[0] && startPort==0,"--server-port-start");
 #undef VALIDATE_CFG
+
+  /*configure server ip list*/
+  if (dstFile[0]) {
+    http_set_server_ip_port_from_file(dstFile);
+  } else {
+    for (i=0;i<gclientcfg.tot_srvs;++i) {
+      http_set_server_ip_port(srvIpAddr,startPort++);
+    }
+  }
 
   /*Read the request template from the file*/
   http_prepare_req_file();
@@ -486,7 +524,7 @@ static void http_parse_args(int argc, char **argv)
   SET_DFLT(gclientcfg.client_count,1);
   SET_DFLT(gclientcfg.reqs,1);
   SET_DFLT(rps_ctxt.rps,1);
-  SET_DFLT(gclientcfg.tot_srv_ports,1);
+  SET_DFLT(gclientcfg.tot_srvs,1);
   SET_DFLT(rps_ctxt.tot_req_to_send,
            (gclientcfg.client_count*gclientcfg.reqs));
 #undef SET_DFLT
@@ -502,7 +540,6 @@ int main(int argc, char **argv)
   signal(SIGPIPE, signal_handler);
 
   http_parse_args(argc,argv);
-  http_populate_port(gclientcfg.srvrport[0],gclientcfg.tot_srv_ports);
 
   base = event_base_new();
 

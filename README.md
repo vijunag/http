@@ -2,6 +2,7 @@
 A simple and easy to use http load generator tool. Tool is based on libevent for asynchronous event handling and uses NodeJS parser for parsing HTTP responses/requests.
 
 ===============How does it work ? ===============
+
 http-client tool can be used to load the server at a particular RPS and connections. Tool opens several connections in parallel and sends the requests
 at the mentioned rate.
 

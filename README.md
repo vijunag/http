@@ -52,6 +52,7 @@ Allowed options:
 
 ===============Sample o/p========================
 ```
+./http-client -c 0.0.0.0 -s google.com -p 80 -k 5
 Setting default value gclientcfg.client_count:1
 Setting default value gclientcfg.reqs:1
 Setting default value rps_ctxt.rps:1

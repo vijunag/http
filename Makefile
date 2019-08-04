@@ -19,7 +19,10 @@ docks: src/http-client src/http-server
 push:
 	docker push localhost:5000/http-server
 
-$(LIBDIR)/lib/libevent.a:
+3rdparty/libevent-master/configure:
+	@cd 3rdparty/libevent-master/autogen.sh
+
+$(LIBDIR)/lib/libevent.a: 3rdparty/libevent-master/configure
 	@mkdir -p $(LIBDIR)
 	@cd 3rdparty/libevent-master/ && ./configure --prefix=$(LIBDIR)/ && make install
 

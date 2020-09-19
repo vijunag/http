@@ -1,4 +1,3 @@
-
 /* Author: Vijay Nag
  * Simple and an easy to use HTTP-client
  */
@@ -33,6 +32,7 @@
 #include <time.h>
 #include <http_parser_iface.h>
 #include <http_time.h>
+#include <http_ssl.h>
 
 #define MAXSRVRENDPOINTS 4096
 #define MAXREQSZ (8192*2)
@@ -71,6 +71,7 @@ typedef struct EndPoint {
 } EndPoint;
 
 typedef struct ClientCfg {
+  int ssl; //is ssl enabled
   char client_ip[MAXIPLEN];
   EndPoint srvs[MAXSRVRENDPOINTS];
   int srvcount;
@@ -101,7 +102,7 @@ ClientCfg gclientcfg;
 
 typedef enum ClientState {
   CLIENT_STATE_INVALID,
-  CLIENT_STATE_CONN,
+  CLIENT_STATE_CONNECTED,
   CLIENT_STATE_RBLOCK,
   CLIENT_STATE_WBLOCK,
   CLIENT_STATE_DISCONNECTED,
@@ -120,6 +121,7 @@ typedef struct ClientInfo {
   HttpParserHandle h;
   HttpStats stats;
   u64bits tick;
+  http_sslclient_ctxt ssl;
 } ClientInfo;
 
 ClientInfo *clientInfo;
@@ -188,13 +190,17 @@ static int send_get_request(ClientInfo *cinfo,int start,int len)
     event_free(ev); \
     ev = NULL; \
 
-  rval=send(cinfo->fd,http_get_req+start,len,0);
+  if (gclientcfg.ssl) {
+    rval=http_ssl_write(&cinfo->ssl,http_get_req+start,len);
+  } else {
+    rval=send(cinfo->fd,http_get_req+start,len,0);
+  }
   if (rval == len) {
    START_LATENCY_TICKS(cinfo); //time to last byte
    INCR_COUNTER(cinfo->stats.reqs);
    INCR_COUNTER(rps_ctxt.tot_req_sent);
    EVENT_FREE_WRITE(cinfo->wev);
-   cinfo->state = CLIENT_STATE_CONN;
+   cinfo->state = CLIENT_STATE_CONNECTED;
   } else if (rval > 0) {
    cinfo->bufidx = start+rval;
    cinfo->state = CLIENT_STATE_WBLOCK;
@@ -202,7 +208,7 @@ static int send_get_request(ClientInfo *cinfo,int start,int len)
    event_add(cinfo->wev,NULL);
   } else if (rval == 0) {
    cinfo->bufidx = 0;
-   cinfo->state = CLIENT_STATE_CONN;
+   cinfo->state = CLIENT_STATE_CONNECTED;
    EVENT_FREE_WRITE(cinfo->wev);
   }
   return rval;
@@ -305,10 +311,11 @@ static void http_stat_summary(void)
 
 static void rx_handler(int fd, short flags, void *udata)
 {
+  int len=0;
   char buff[8192];
   ClientInfo *cinfo = (ClientInfo*)udata;
 
-  int len = recv(fd, buff, sizeof(buff), 0);
+  len=recv(fd, buff, sizeof(buff), 0);
   buff[len] = 0;
 
   if (!len || len < 0) {
@@ -318,7 +325,7 @@ static void rx_handler(int fd, short flags, void *udata)
 
   HttpParse(&cinfo->h,buff,len);
   DEBUG_LOG(LOG_LEVEL_DEBUG,"Received resp for client-id %d of len %d\n", cinfo->idx, len);
-  DEBUG_LOG(LOG_LEVEL_DEBUG,"%s\n", buff);
+  DEBUG_LOG(LOG_LEVEL_DEBUG,"\n%s\n", buff);
   if (cinfo->stats.rsps == gclientcfg.reqs)
     goto finish;
   return;
@@ -354,6 +361,7 @@ static void http_req_handler(int fd, short event, void *ud)
         cinfo->state == CLIENT_STATE_WBLOCK) //no writes until further rsp
        continue;
     if (cinfo->stats.reqs < gclientcfg.reqs) {
+      DEBUG_LOG(LOG_LEVEL_TRACE, "\n%s\n",http_get_req);
       if (!send_get_request(cinfo,0,reqlen)) {
         goto finish;
       }
@@ -385,7 +393,6 @@ static void tx_handler(int fd, short flags, void *udata)
 
 static void cnxn_handler(int fd, short flags, void *udata)
 {
-  char buff[1024];
   ClientInfo *cinfo = (ClientInfo*)udata;
   static struct timeval timeout = {1,0};
 
@@ -400,7 +407,54 @@ static void cnxn_handler(int fd, short flags, void *udata)
   event_free(cinfo->wev);
   cinfo->wev = NULL;
   cinfo->rev = event_new(base, fd, EV_READ|EV_PERSIST,rx_handler,(void*)cinfo);
-  cinfo->state = CLIENT_STATE_CONN;
+  cinfo->state = CLIENT_STATE_CONNECTED;
+  event_add(cinfo->rev, NULL);
+}
+
+static void ssl_rx_handler(int fd, short flags, void *udata)
+{
+  int len;
+  char buff[8192];
+  ClientInfo *cinfo = (ClientInfo*)udata;
+
+  len=http_ssl_read(&cinfo->ssl, buff, sizeof(buff));
+  buff[len]=0;
+
+  HttpParse(&cinfo->h,buff,len);
+  DEBUG_LOG(LOG_LEVEL_DEBUG,"Received resp for client-id %d of len %d\n", cinfo->idx, len);
+  DEBUG_LOG(LOG_LEVEL_DEBUG,"\n%s\n", buff);
+  if (cinfo->stats.rsps == gclientcfg.reqs)
+    goto finish;
+  return;
+
+finish:
+  http_client_deregister(cinfo);
+  rps_ctxt.pending_clients--;
+}
+
+static void ssl_tx_handler(int fd, short flags, void *udata)
+{
+  ClientInfo *cinfo = (ClientInfo*)udata;
+}
+
+static void ssl_cnxn_handler(int fd, short flags, void *udata)
+{
+  ClientInfo *cinfo = (ClientInfo*)udata;
+  int rval;
+
+  if ((rval = http_init_ctx(&cinfo->ssl, fd))<0) {
+    /*SSL layer not up yet*/
+    return;
+  }
+
+  rps_ctxt.pending_clients++;
+  if (rps_ctxt.pending_clients == 1) {
+    start_timer(&g_timer_ev.rps_timer,http_req_handler);
+  }
+  event_free(cinfo->wev);
+  cinfo->wev = NULL;
+  cinfo->rev = event_new(base, fd, EV_READ|EV_PERSIST,ssl_rx_handler,(void*)cinfo);
+  cinfo->state = CLIENT_STATE_CONNECTED;
   event_add(cinfo->rev, NULL);
 }
 
@@ -411,6 +465,7 @@ static void create_new_cnxn(int cnxn_id)
   cinfo->idx = cnxn_id;
   int fd = -1;
   EndPoint *ep = NULL;
+  short flags;
 
   cinfo->stats.latency.latency = calloc(sizeof(uint64_t)*MAX_LATENCIES,1);
   if (!cinfo->stats.latency.latency) {
@@ -430,7 +485,11 @@ static void create_new_cnxn(int cnxn_id)
 
   /*set the socket to be non-blocking*/
   fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
-  cinfo->wev = event_new(base, fd, EV_WRITE,cnxn_handler, (void*)cinfo);
+
+  flags = EV_WRITE | (gclientcfg.ssl ? EV_PERSIST : EV_WRITE);
+  cinfo->wev = event_new(base,fd,flags,
+               gclientcfg.ssl ? ssl_cnxn_handler : cnxn_handler,
+               (void*)cinfo);
   event_add(cinfo->wev, NULL);
 
   memset((void*)&addr, 0, sizeof(addr));
@@ -504,7 +563,7 @@ static inline void http_set_server_ip_port(const char *ip, uint16_t port)
     }
     gclientcfg.srvs[gclientcfg.srvcount].ip=*(struct in_addr*)h->h_addr_list[0];
     inet_ntop(AF_INET,(void*)&gclientcfg.srvs[gclientcfg.srvcount].ip,str,INET_ADDRSTRLEN);
-    DEBUG_LOG(LOG_LEVEL_ERROR,"Server located at address: %s\n",str);
+    DEBUG_LOG(LOG_LEVEL_INFO,"Server located at address: %s\n",str);
   } else {
     gclientcfg.srvs[gclientcfg.srvcount].ip=*(struct in_addr*)buf;
   }
@@ -512,7 +571,7 @@ static inline void http_set_server_ip_port(const char *ip, uint16_t port)
   gclientcfg.srvcount++;
 }
 
-static const char *optString ="hc:n:i:r:s:p:l:f:d:k:";
+static const char *optString ="hc:n:i:r:s:p:l:f:d:k:o";
 static const struct option longOpts[] = {
   {"help", no_argument, NULL, 0 },
   {"client-ip", required_argument, NULL, 0 },
@@ -525,6 +584,7 @@ static const struct option longOpts[] = {
   {"file", required_argument, NULL,0},
   {"dest-file", required_argument, NULL, 0},
   {"debug-log", required_argument, NULL,0},
+  {"https-clients", no_argument, NULL,0},
   { NULL, no_argument, NULL, 0}
 };
 
@@ -543,6 +603,7 @@ static void print_usage(void)
   printf("-d [ --dest-file ]                    Read Http Dest Endpoint from file\n");
   printf("-f [ --file ]                         Http Request template\n");
   printf("-k [--debug-log ]                     Print Debug logs\n");
+  printf("-o [--https-clients]                  Use Https Client\n");
 }
 
 static void http_prepare_req_file(void)
@@ -605,7 +666,7 @@ static void http_parse_args(int argc, char **argv)
 {
   int retval = -1, opt = -1, longIndex, i=0;
   char srvIpAddr[MAXIPLEN];
-  uint16_t startPort=0;
+  uint16_t startPort=80;
   char dstFile[MAXFILELEN] = {0};
 
   opt = getopt_long(argc, argv, optString, longOpts, &longIndex);
@@ -622,6 +683,7 @@ static void http_parse_args(int argc, char **argv)
      case 'f': strncpy(gclientcfg.httpfile,optarg,sizeof(gclientcfg.httpfile)); break;
      case 'd': strncpy(dstFile, optarg, sizeof(dstFile)); break;
      case 'k': g_log_enabled=atoi(optarg); break;
+     case 'o': gclientcfg.ssl = 1; break;
      case 0:
        if (!strcmp("client-ip",longOpts[longIndex].name)) {
          strncpy(gclientcfg.client_ip,optarg,MAXIPLEN);
@@ -646,6 +708,8 @@ static void http_parse_args(int argc, char **argv)
        } else if (!strcmp("help", longOpts[longIndex].name)) {
          print_usage();
          exit(0);
+       } else if (!strcmp("https-clients", longOpts[longIndex].name)) {
+         gclientcfg.ssl = 1;
        }
     default:
        print_usage();
@@ -663,7 +727,7 @@ static void http_parse_args(int argc, char **argv)
   }
 
   /*Thorough validation*/
-  VALIDATE_CFG(gclientcfg.client_ip[0]==0,"--client-ip");
+//  VALIDATE_CFG(gclientcfg.client_ip[0]==0,"--client-ip");
   VALIDATE_CFG(!dstFile[0] && srvIpAddr==0,"--server-ip");
   VALIDATE_CFG(!dstFile[0] && startPort==0,"--server-port-start");
 #undef VALIDATE_CFG
@@ -699,6 +763,10 @@ static void http_parse_args(int argc, char **argv)
   if (!clientInfo) {
     printf("Cannot allocate memory for clientInfo\n");
     exit(-1);
+  }
+
+  if (gclientcfg.ssl) {
+    http_init_openssl();
   }
   /*Read the request template from the file*/
   http_prepare_req_file();

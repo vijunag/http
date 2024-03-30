@@ -118,8 +118,10 @@ typedef struct ClientInfo {
   ClientState state;
   const char *ip;
   uint16_t port;
-  struct event *rev;
-  struct event *wev;
+  struct event rev;
+  struct event wev;
+  int rev_assigned;
+  int wev_assigned;
   HttpParserHandle h;
   HttpStats stats;
   u64bits tick;
@@ -188,10 +190,11 @@ static int send_get_request(ClientInfo *cinfo,int start,int len)
   if (cinfo->fd == -1)
     return 0;
 
-#define EVENT_FREE_WRITE(ev) \
-  if (ev) \
-    event_free(ev); \
-    ev = NULL; \
+#define EVENT_FREE_WRITE(cinfo) \
+  if (cinfo->wev_assigned) {    \
+    event_del(&cinfo->wev);     \
+    cinfo->wev_assigned = 0;    \
+  }
 
   if (gclientcfg.ssl) {
     rval=http_ssl_write(&cinfo->ssl,http_get_req+start,len);
@@ -202,17 +205,18 @@ static int send_get_request(ClientInfo *cinfo,int start,int len)
    START_LATENCY_TICKS(cinfo); //time to last byte
    INCR_COUNTER(cinfo->stats.reqs);
    INCR_COUNTER(rps_ctxt.tot_req_sent);
-   EVENT_FREE_WRITE(cinfo->wev);
+   EVENT_FREE_WRITE(cinfo);
    cinfo->state = CLIENT_STATE_CONNECTED;
   } else if (rval > 0) {
    cinfo->bufidx = start+rval;
    cinfo->state = CLIENT_STATE_WBLOCK;
-   cinfo->wev = event_new(base,cinfo->fd,EV_WRITE|EV_PERSIST,tx_handler,(void*)cinfo);
-   event_add(cinfo->wev,NULL);
+   event_assign(&cinfo->wev, base, cinfo->fd, EV_WRITE | EV_PERSIST, tx_handler, (void*)cinfo);
+   event_add(&cinfo->wev, NULL);
+   cinfo->wev_assigned = 1;
   } else if (rval == 0) {
    cinfo->bufidx = 0;
    cinfo->state = CLIENT_STATE_CONNECTED;
-   EVENT_FREE_WRITE(cinfo->wev);
+   EVENT_FREE_WRITE(cinfo);
   }
   return rval;
 }
@@ -222,13 +226,14 @@ static void http_client_deregister(ClientInfo *cinfo)
   if (cinfo->fd == -1)
     return;
 
-  if (cinfo->rev) {
-    event_free(cinfo->rev);
-    cinfo->rev=NULL;
+  if (cinfo->rev_assigned) {
+    event_del(&cinfo->rev);
+    cinfo->rev_assigned = 0;
   }
-  if (cinfo->wev) {
-    event_free(cinfo->wev);
-    cinfo->wev=NULL;
+
+  if (cinfo->wev_assigned) {
+    event_del(&cinfo->wev);
+    cinfo->wev_assigned = 0;
   }
 
   close(cinfo->fd);
@@ -412,11 +417,12 @@ static void cnxn_handler(int fd, short flags, void *udata)
     start_timer(&g_timer_ev.rps_timer,http_req_handler);
   }
 
-  event_free(cinfo->wev);
-  cinfo->wev = NULL;
-  cinfo->rev = event_new(base, fd, EV_READ|EV_PERSIST,rx_handler,(void*)cinfo);
+  event_del(&cinfo->wev);
+  cinfo->wev_assigned = 0;
+  event_assign(&cinfo->rev, base, fd, EV_READ|EV_PERSIST,rx_handler,(void*)cinfo);
+  cinfo->rev_assigned = 1;
   cinfo->state = CLIENT_STATE_CONNECTED;
-  event_add(cinfo->rev, NULL);
+  event_add(&cinfo->rev, NULL);
 }
 
 static void ssl_rx_handler(int fd, short flags, void *udata)
@@ -459,11 +465,12 @@ static void ssl_cnxn_handler(int fd, short flags, void *udata)
   if (rps_ctxt.pending_clients == 1) {
     start_timer(&g_timer_ev.rps_timer,http_req_handler);
   }
-  event_free(cinfo->wev);
-  cinfo->wev = NULL;
-  cinfo->rev = event_new(base, fd, EV_READ|EV_PERSIST,ssl_rx_handler,(void*)cinfo);
+  event_del(&cinfo->wev);
+  cinfo->wev_assigned = 0;
+  event_assign(&cinfo->rev, base, fd, EV_READ|EV_PERSIST,ssl_rx_handler,(void*)cinfo);
+  cinfo->rev_assigned = 1;
   cinfo->state = CLIENT_STATE_CONNECTED;
-  event_add(cinfo->rev, NULL);
+  event_add(&cinfo->rev, NULL);
 }
 
 static void create_new_cnxn(int cnxn_id)
@@ -495,10 +502,11 @@ static void create_new_cnxn(int cnxn_id)
   fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
 
   flags = EV_WRITE | (gclientcfg.ssl ? EV_PERSIST : EV_WRITE);
-  cinfo->wev = event_new(base,fd,flags,
+  event_assign(&cinfo->wev, base,fd,flags,
                gclientcfg.ssl ? ssl_cnxn_handler : cnxn_handler,
                (void*)cinfo);
-  event_add(cinfo->wev, NULL);
+  cinfo->wev_assigned = 1;
+  event_add(&cinfo->wev, NULL);
 
   memset((void*)&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
@@ -688,6 +696,7 @@ static int http_set_server_ip_port_from_file(const char *file)
     http_set_server_ip_port(ipAddr,atoi(port));
     gclientcfg.tot_srvs++; //adjust total servers depending on number of lines in the client spec file
   }
+  return 0;
 }
 
 static void http_parse_args(int argc, char **argv)
@@ -762,7 +771,7 @@ static void http_parse_args(int argc, char **argv)
 
   /*Thorough validation*/
 //  VALIDATE_CFG(gclientcfg.client_ip[0]==0,"--client-ip");
-  VALIDATE_CFG(!dstFile[0] && srvIpAddr==0,"--server-ip");
+  VALIDATE_CFG(!dstFile[0] && srvIpAddr[0]==0,"--server-ip");
   VALIDATE_CFG(!dstFile[0] && startPort==0,"--server-port-start");
 #undef VALIDATE_CFG
 

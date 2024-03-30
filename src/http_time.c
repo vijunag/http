@@ -39,12 +39,10 @@ static void CalibrateTicks()
 }
 
 /* Call once before using RDTSC, has side effect of binding process to CPU1 */
-void InitRdtsc(void)
+void InitRdtsc(unsigned long cpu_mask)
 {
   int rval;
-  unsigned long cpuMask;
-  cpuMask = 1; // bind to cpu 1
-  rval=sched_setaffinity(0, sizeof(cpuMask), &cpuMask);
+  rval=sched_setaffinity(0, sizeof(cpu_mask), &cpu_mask);
   if (rval < 0)
     printf("sched_setaffinity() failed with errno:%s\n",strerror(errno));
   CalibrateTicks();

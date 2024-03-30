@@ -24,7 +24,7 @@ static inline u64bits RDTSC()
   return ((u64bits)hi << 32) | lo;
 }
 
-void InitRdtsc(void);
+void InitRdtsc(unsigned long cpu_mask);
 extern void test_rdtsc();
 struct timespec *TimeSpecDiff(struct timespec *ts1, struct timespec *ts2);
 

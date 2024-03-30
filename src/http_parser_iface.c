@@ -139,7 +139,7 @@ static http_parser_settings settings =
 
 void HttpParserInit(HttpParserHandle *h, http_callback cb, void *ud)
 {
-  if (h->init)
+  if (h->init == 1)
     return;
 
   http_parser_init(&h->parser, HTTP_BOTH);

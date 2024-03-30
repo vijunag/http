@@ -20,7 +20,7 @@ push:
 	docker push localhost:5000/http-server
 
 3rdparty/libevent-master/configure:
-	@cd 3rdparty/libevent-master/autogen.sh
+	@cd 3rdparty/libevent-master/ && sh autogen.sh
 
 $(LIBDIR)/lib/libevent.a: 3rdparty/libevent-master/configure
 	@mkdir -p $(LIBDIR)

@@ -72,7 +72,7 @@ typedef struct EndPoint {
 
 typedef struct ClientCfg {
   int ssl; //is ssl enabled
-  char client_ip[MAXIPLEN];
+  EndPoint client_ip;
   EndPoint srvs[MAXSRVRENDPOINTS];
   int srvcount;
   uint16_t tot_srvs; //<=MAXPORT
@@ -80,6 +80,8 @@ typedef struct ClientCfg {
   int reqs; //reqs per client
   int client_count; //client count
   int rps;
+  int persist;
+  unsigned long cpu_mask;
 } ClientCfg;
 
 ClientCfg gclientcfg;
@@ -148,10 +150,11 @@ struct ConnectionInfo {
 extern void start_timer(struct event **ev, timer_cb cb);
 extern void stop_timer(struct event **ev);
 static void tx_handler(int fd, short flags, void *udata);
+static void create_new_cnxn(int cnxn_id);
 
 struct event_base *base;
 
-const char *def_http_get_req = "GET / HTTP/1.1\r\nHost: helloworld-svc\r\nUser-Agent: http-client\r\nAccept:*/*\r\n\r\n";
+const char *def_http_get_req = "GET / HTTP/1.1\r\nHost: http-client\r\nUser-Agent: http-client\r\nAccept:*/*\r\n\r\n";
 int reqlen;
 char http_get_req[MAXREQSZ];
 int g_log_enabled;
@@ -231,6 +234,10 @@ static void http_client_deregister(ClientInfo *cinfo)
   close(cinfo->fd);
   cinfo->fd = -1;
   cinfo->state = CLIENT_STATE_DISCONNECTED;
+
+  if (gclientcfg.persist) {
+      create_new_cnxn(cinfo->idx);
+  }
 }
 
 static int http_parse_cb(HttpEventType event, void *ud)
@@ -348,7 +355,7 @@ static void http_req_handler(int fd, short event, void *ud)
   }
 
   /*Check if we've sent the reqd reqs/client*/
-  if (rps_ctxt.tot_req_to_send ==
+  if (!gclientcfg.persist && rps_ctxt.tot_req_to_send ==
       rps_ctxt.tot_req_sent) {
     stop_timer(&g_timer_ev.rps_timer);
     return;
@@ -358,7 +365,8 @@ static void http_req_handler(int fd, short event, void *ud)
     cinfo = &clientInfo[rps_ctxt.idx];
     rps_ctxt.idx = (rps_ctxt.idx+1)%gclientcfg.client_count;
     if (cinfo->state == CLIENT_STATE_INVALID ||
-        cinfo->state == CLIENT_STATE_WBLOCK) //no writes until further rsp
+        cinfo->state == CLIENT_STATE_WBLOCK ||
+        cinfo->state == CLIENT_STATE_DISCONNECTED) //no writes until further rsp
        continue;
     if (cinfo->stats.reqs < gclientcfg.reqs) {
       DEBUG_LOG(LOG_LEVEL_TRACE, "\n%s\n",http_get_req);
@@ -496,6 +504,9 @@ static void create_new_cnxn(int cnxn_id)
   addr.sin_family = AF_INET;
   addr.sin_addr.s_addr = INADDR_ANY;
   addr.sin_port = 0; //ntohs(35664);
+  if (gclientcfg.client_ip.ip.s_addr) {
+    addr.sin_addr.s_addr = gclientcfg.client_ip.ip.s_addr;
+  }
   SYSCALL_ERR_EXIT(bind(fd, (struct sockaddr*)&addr, sizeof(addr)));
 
   ep = get_nxt_server_endpt();
@@ -508,7 +519,7 @@ static void create_new_cnxn(int cnxn_id)
 
 static void timer_handler(int fd, short event, void *arg)
 {
-  int burst_count = 100;
+  int burst_count = 200;
   int cnt = 0;
 
   if (cnxninfo.cnxns < gclientcfg.client_count) {
@@ -546,8 +557,23 @@ void stop_timer(struct event **ev)
 void exit_handler(void)
 {
   int i = 3;
-  for (i = 3; i < 8192; ++i)
+  for (i = 3; i < 65535; ++i)
     close(i);
+}
+
+static inline int http_parse_client_ip_addr(const char *ip)
+{
+    unsigned char buf[sizeof(struct in6_addr)];
+    char str[INET_ADDRSTRLEN];
+
+    if (inet_pton(AF_INET, ip, (void*)buf) <= 0) {
+        //lets try ipv6 once
+        if (inet_pton(AF_INET6, ip, (void*)buf) <=0) {
+            return -1;
+        }
+    }
+    gclientcfg.client_ip.ip = *(struct in_addr*)buf;
+    return 0;
 }
 
 static inline void http_set_server_ip_port(const char *ip, uint16_t port)
@@ -571,7 +597,7 @@ static inline void http_set_server_ip_port(const char *ip, uint16_t port)
   gclientcfg.srvcount++;
 }
 
-static const char *optString ="hc:n:i:r:s:p:l:f:d:k:o";
+static const char *optString ="hc:n:i:r:s:p:l:f:d:k:ogm:";
 static const struct option longOpts[] = {
   {"help", no_argument, NULL, 0 },
   {"client-ip", required_argument, NULL, 0 },
@@ -585,6 +611,8 @@ static const struct option longOpts[] = {
   {"dest-file", required_argument, NULL, 0},
   {"debug-log", required_argument, NULL,0},
   {"https-clients", no_argument, NULL,0},
+  {"keep-going", no_argument, NULL, 0},
+  {"cpu-mask", required_argument, NULL, 0},
   { NULL, no_argument, NULL, 0}
 };
 
@@ -665,7 +693,7 @@ static int http_set_server_ip_port_from_file(const char *file)
 static void http_parse_args(int argc, char **argv)
 {
   int retval = -1, opt = -1, longIndex, i=0;
-  char srvIpAddr[MAXIPLEN];
+  char srvIpAddr[MAXIPLEN], clientIpAddr[MAXIPLEN] = {0};
   uint16_t startPort=80;
   char dstFile[MAXFILELEN] = {0};
 
@@ -673,7 +701,7 @@ static void http_parse_args(int argc, char **argv)
   while(opt!=-1) {
     switch(opt) {
      case 'h': print_usage(); break;
-     case 'c': strncpy(gclientcfg.client_ip,optarg,MAXIPLEN); break;
+     case 'c': strncpy(clientIpAddr,optarg,MAXIPLEN); break;
      case 'n': gclientcfg.client_count = atoi(optarg); break;
      case 'i': gclientcfg.reqs = atoi(optarg); break;
      case 'r': rps_ctxt.rps = atoi(optarg); break;
@@ -684,9 +712,11 @@ static void http_parse_args(int argc, char **argv)
      case 'd': strncpy(dstFile, optarg, sizeof(dstFile)); break;
      case 'k': g_log_enabled=atoi(optarg); break;
      case 'o': gclientcfg.ssl = 1; break;
+     case 'g': gclientcfg.persist = 1; break;
+     case 'm': gclientcfg.cpu_mask = atol(optarg); break;
      case 0:
        if (!strcmp("client-ip",longOpts[longIndex].name)) {
-         strncpy(gclientcfg.client_ip,optarg,MAXIPLEN);
+         strncpy(clientIpAddr,optarg,MAXIPLEN);
        } else if (!strcmp("num-client",longOpts[longIndex].name)) {
          gclientcfg.client_count = atoi(optarg);
        } else if (!strcmp("req-client",longOpts[longIndex].name)) {
@@ -710,6 +740,10 @@ static void http_parse_args(int argc, char **argv)
          exit(0);
        } else if (!strcmp("https-clients", longOpts[longIndex].name)) {
          gclientcfg.ssl = 1;
+       } else if (!strcmp("keep-going", longOpts[longIndex].name)) {
+         gclientcfg.persist = 1;
+       } else if (!strcmp("cpu-mask", longOpts[longIndex].name)) {
+         gclientcfg.cpu_mask = atol(optarg); 
        }
     default:
        print_usage();
@@ -742,9 +776,17 @@ static void http_parse_args(int argc, char **argv)
   SET_DFLT(gclientcfg.reqs,1);
   SET_DFLT(rps_ctxt.rps,1);
   SET_DFLT(gclientcfg.tot_srvs,1);
-  SET_DFLT(rps_ctxt.tot_req_to_send,
-           (gclientcfg.client_count*gclientcfg.reqs));
+  SET_DFLT(gclientcfg.persist, 0);
 #undef SET_DFLT
+
+  if (clientIpAddr[0]) {
+      int rval = http_parse_client_ip_addr(clientIpAddr);
+      if (rval < 0) {
+          printf("Invalid IP address: %s\n", clientIpAddr);
+          print_usage();
+          exit(-1);
+      }
+  }
 
   if (g_log_enabled > LOG_LEVEL_MAX)
     g_log_enabled = LOG_LEVEL_DEBUG;
@@ -782,7 +824,7 @@ int main(int argc, char **argv)
 
   signal(SIGPIPE, SIG_IGN); //spurious SIG_IGN
 
-  InitRdtsc(); //Initialize timer library
+  InitRdtsc(gclientcfg.cpu_mask); //Initialize timer library
 
   http_parse_args(argc,argv); //Parse args
 

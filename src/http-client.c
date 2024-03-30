@@ -640,6 +640,8 @@ static void print_usage(void)
   printf("-f [ --file ]                         Http Request template\n");
   printf("-k [--debug-log ]                     Print Debug logs\n");
   printf("-o [--https-clients]                  Use Https Client\n");
+  printf("-g [--keep-going]                     Retry connection after server close\n");
+  printf("-m [--cpu-mask]                       Pin to a CPU\n");
 }
 
 static void http_prepare_req_file(void)

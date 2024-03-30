@@ -2,7 +2,7 @@
 
 CC := gcc
 LD := gcc
-CFLAGS := -I/usr/local/octave/3.8.0/include/ -g -O0 -c -I. -I 3rdparty/include/ -Wno-deprecated-declarations
+CFLAGS := -g -O0 -c -I. -I 3rdparty/include/ -Wno-deprecated-declarations
 LDFLAGS := -L3rdparty/results/lib -levent -lcrypto -lssl  -lpthread -ldl
 SRCS := $(filter-out http-server.c, $(filter-out http_stub.c, $(wildcard *.c)))
 OBJS := $(filter-out ssl-client.o, $(filter-out ssl-server.o, $(patsubst %.c,%.o,$(SRCS))))

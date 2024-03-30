@@ -354,7 +354,7 @@ static void http_req_handler(int fd, short event, void *ud)
   int reqs_sent=0;
 
   /*No clients to send the data on*/
-  if (!rps_ctxt.pending_clients) {
+  if (!gclientcfg.persist && !rps_ctxt.pending_clients) {
     stop_timer(&g_timer_ev.rps_timer);
     return;
   }
@@ -373,7 +373,7 @@ static void http_req_handler(int fd, short event, void *ud)
         cinfo->state == CLIENT_STATE_WBLOCK ||
         cinfo->state == CLIENT_STATE_DISCONNECTED) //no writes until further rsp
        continue;
-    if (cinfo->stats.reqs < gclientcfg.reqs) {
+    if (gclientcfg.persist || cinfo->stats.reqs < gclientcfg.reqs) {
       DEBUG_LOG(LOG_LEVEL_TRACE, "\n%s\n",http_get_req);
       if (!send_get_request(cinfo,0,reqlen)) {
         goto finish;
@@ -789,6 +789,8 @@ static void http_parse_args(int argc, char **argv)
   SET_DFLT(gclientcfg.tot_srvs,1);
   SET_DFLT(gclientcfg.persist, 0);
   SET_DFLT(gclientcfg.cpu_mask, 1);
+  SET_DFLT(rps_ctxt.tot_req_to_send,
+          (gclientcfg.client_count * gclientcfg.reqs));
 #undef SET_DFLT
 
   if (clientIpAddr[0]) {

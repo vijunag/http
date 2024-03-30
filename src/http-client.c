@@ -802,6 +802,10 @@ static void http_parse_args(int argc, char **argv)
       }
   }
 
+  if (gclientcfg.ssl && startPort == 80) {
+      startPort = 443;
+  }
+
   if (g_log_enabled > LOG_LEVEL_MAX)
     g_log_enabled = LOG_LEVEL_DEBUG;
   printf("Setting LOG level to %d\n",g_log_enabled);

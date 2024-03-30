@@ -28,7 +28,7 @@ typedef enum HttpEventType {
   HTTP_EV_TYPE_MAX
 } HttpEventType;
 
-#define MAX_LATENCIES 1000000 //1000 buckets, reasonable default
+#define MAX_LATENCIES 1000 //1000 buckets, reasonable default
 typedef struct HttpLatencyDistArray {
   uint64_t *latency;
   int cur_idx;

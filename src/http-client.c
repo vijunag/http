@@ -788,6 +788,7 @@ static void http_parse_args(int argc, char **argv)
   SET_DFLT(rps_ctxt.rps,1);
   SET_DFLT(gclientcfg.tot_srvs,1);
   SET_DFLT(gclientcfg.persist, 0);
+  SET_DFLT(gclientcfg.cpu_mask, 1);
 #undef SET_DFLT
 
   if (clientIpAddr[0]) {

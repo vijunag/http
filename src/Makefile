@@ -2,8 +2,9 @@
 
 CC := gcc
 LD := gcc
-CFLAGS := -g -O0 -c -I. -I 3rdparty/include/ -Wno-deprecated-declarations
-LDFLAGS := -L3rdparty/results/lib -levent -lcrypto -lssl  -lpthread -ldl
+ROOT_DIR :=../
+CFLAGS := -g -O0 -c -I. -I $(ROOT_DIR)3rdparty/results/include/ -Wno-deprecated-declarations
+LDFLAGS := $(ROOT_DIR)3rdparty/results/lib/libevent.a -lcrypto -lssl  -lpthread -ldl
 SRCS := $(filter-out http-server.c, $(filter-out http_stub.c, $(wildcard *.c)))
 OBJS := $(filter-out ssl-client.o, $(filter-out ssl-server.o, $(patsubst %.c,%.o,$(SRCS))))
 
@@ -17,7 +18,7 @@ http-client: $(OBJS)
 	$(LD) $^ -o $@ $(LDFLAGS)
 
 http-server:
-	$(LD) -g -O0 http-server.c -o http-server $(LDFLAGS)
+	$(LD) -g -O2 -I. -I$(ROOT_DIR)3rdparty/results/include  http-server.c -o http-server $(LDFLAGS)
 
 test: $(OBJS)
 	$(LD) -g -O0 http_stub.c -o http_stub $(filter-out http-client.o, $(OBJS)) $(LDFLAGS)

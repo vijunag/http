@@ -482,10 +482,12 @@ static void create_new_cnxn(int cnxn_id)
   EndPoint *ep = NULL;
   short flags;
 
-  cinfo->stats.latency.latency = calloc(sizeof(uint64_t)*MAX_LATENCIES,1);
   if (!cinfo->stats.latency.latency) {
-    DEBUG_LOG(LOG_LEVEL_INFO,"create_new_cnxn():malloc failed\n");
-    exit(-1);
+    cinfo->stats.latency.latency = calloc(sizeof(uint64_t)*MAX_LATENCIES,1);
+    if (!cinfo->stats.latency.latency) {
+      DEBUG_LOG(LOG_LEVEL_INFO,"create_new_cnxn():malloc failed\n");
+      exit(-1);
+    }
   }
 
   /*Init the HTTP Parser module*/
@@ -842,9 +844,9 @@ int main(int argc, char **argv)
 
   signal(SIGPIPE, SIG_IGN); //spurious SIG_IGN
 
-  InitRdtsc(gclientcfg.cpu_mask); //Initialize timer library
-
   http_parse_args(argc,argv); //Parse args
+
+  InitRdtsc(gclientcfg.cpu_mask); //Initialize timer library
 
   base = event_base_new(); //Initialize libevent
 

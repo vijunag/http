@@ -104,8 +104,8 @@ P95                   :  0.166799
 P99                   :  0.166799
 ```
 ======================Build Dependencies===================
-The following libraries/tools are needed to build the tool
 ```
+The following libraries/tools are needed to build the tool
 * automake
 * libtool
 * autoconf

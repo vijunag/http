@@ -338,7 +338,7 @@ static void rx_handler(int fd, short flags, void *udata)
   HttpParse(&cinfo->h,buff,len);
   DEBUG_LOG(LOG_LEVEL_DEBUG,"Received resp for client-id %d of len %d\n", cinfo->idx, len);
   DEBUG_LOG(LOG_LEVEL_DEBUG,"\n%s\n", buff);
-  if (cinfo->stats.rsps == gclientcfg.reqs)
+  if (!gclientcfg.persist && (cinfo->stats.rsps == gclientcfg.reqs))
     goto finish;
   return;
 
